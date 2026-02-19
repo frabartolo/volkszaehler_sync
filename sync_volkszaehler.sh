@@ -42,9 +42,11 @@ DEST_CNF=""
 ###############################################################################
 
 cleanup() {
-    # Clean up temporary config files
+    # Clean up temporary config files and SQL files
     [ -n "$SOURCE_CNF" ] && rm -f "$SOURCE_CNF"
     [ -n "$DEST_CNF" ] && rm -f "$DEST_CNF"
+    # Clean up any temporary SQL files that might have been left
+    rm -f /tmp/tmp.*.sql 2>/dev/null || true
 }
 
 trap cleanup EXIT INT TERM
@@ -168,9 +170,14 @@ sync_entities() {
     
     # Execute the bulk insert
     if [ -s "$tmp_sql" ]; then
-        mysql_dest < "$tmp_sql"
-        local count=$(wc -l < "$tmp_sql")
-        log_message "Synced $count entities"
+        if mysql_dest < "$tmp_sql" 2>&1; then
+            local count=$(wc -l < "$tmp_sql")
+            log_message "Processed $count entity INSERT statements"
+        else
+            log_error "Failed to execute entities bulk insert"
+            rm -f "$tmp_sql"
+            return 1
+        fi
     fi
     
     rm -f "$tmp_sql"
@@ -197,9 +204,14 @@ sync_properties() {
     
     # Execute the bulk insert
     if [ -s "$tmp_sql" ]; then
-        mysql_dest < "$tmp_sql"
-        local count=$(wc -l < "$tmp_sql")
-        log_message "Synced $count properties"
+        if mysql_dest < "$tmp_sql" 2>&1; then
+            local count=$(wc -l < "$tmp_sql")
+            log_message "Processed $count property INSERT statements"
+        else
+            log_error "Failed to execute properties bulk insert"
+            rm -f "$tmp_sql"
+            return 1
+        fi
     fi
     
     rm -f "$tmp_sql"
@@ -225,9 +237,14 @@ sync_entities_in_aggregator() {
     
     # Execute the bulk insert
     if [ -s "$tmp_sql" ]; then
-        mysql_dest < "$tmp_sql"
-        local count=$(wc -l < "$tmp_sql")
-        log_message "Synced $count aggregator relationships"
+        if mysql_dest < "$tmp_sql" 2>&1; then
+            local count=$(wc -l < "$tmp_sql")
+            log_message "Processed $count aggregator relationship INSERT statements"
+        else
+            log_error "Failed to execute aggregator relationships bulk insert"
+            rm -f "$tmp_sql"
+            return 1
+        fi
     fi
     
     rm -f "$tmp_sql"
@@ -238,7 +255,11 @@ sync_data() {
     log_message "Syncing data table..."
     
     # Get all channel_ids from source
-    local channel_ids=$(mysql_source -e "SELECT DISTINCT channel_id FROM data;")
+    local channel_ids
+    if ! channel_ids=$(mysql_source -e "SELECT DISTINCT channel_id FROM data;" 2>&1); then
+        log_error "Failed to get channel_ids from source database"
+        return 1
+    fi
     
     for channel_id in $channel_ids; do
         # Validate channel_id is numeric
@@ -248,7 +269,11 @@ sync_data() {
         fi
         
         # Get highest timestamp for this channel in destination
-        local max_timestamp=$(mysql_dest -e "SELECT IFNULL(MAX(timestamp), 0) FROM data WHERE channel_id = $channel_id;")
+        local max_timestamp
+        if ! max_timestamp=$(mysql_dest -e "SELECT IFNULL(MAX(timestamp), 0) FROM data WHERE channel_id = $channel_id;" 2>&1); then
+            log_error "Failed to get max timestamp for channel $channel_id"
+            max_timestamp=0
+        fi
         
         # Validate max_timestamp is numeric
         if ! [[ "$max_timestamp" =~ ^[0-9]+$ ]]; then
@@ -258,7 +283,11 @@ sync_data() {
         log_message "Channel $channel_id: Syncing data after timestamp $max_timestamp"
         
         # Get count of new records
-        local new_count=$(mysql_source -e "SELECT COUNT(*) FROM data WHERE channel_id = $channel_id AND timestamp > $max_timestamp;")
+        local new_count
+        if ! new_count=$(mysql_source -e "SELECT COUNT(*) FROM data WHERE channel_id = $channel_id AND timestamp > $max_timestamp;" 2>&1); then
+            log_error "Failed to get count for channel $channel_id"
+            continue
+        fi
         
         if [ "$new_count" -gt 0 ]; then
             log_message "Found $new_count new records for channel $channel_id"
@@ -282,7 +311,11 @@ sync_data() {
             
             # Execute the bulk insert
             if [ -s "$tmp_sql" ]; then
-                mysql_dest < "$tmp_sql"
+                if mysql_dest < "$tmp_sql" 2>&1; then
+                    log_message "Successfully synced $new_count records for channel $channel_id"
+                else
+                    log_error "Failed to execute data bulk insert for channel $channel_id"
+                fi
             fi
             
             rm -f "$tmp_sql"
@@ -295,8 +328,8 @@ sync_data() {
 sync_aggregate() {
     log_message "Syncing aggregate table..."
     
-    # Get all unique type and channel_id combinations from source
-    mysql_source -e "SELECT DISTINCT type, channel_id FROM aggregate;" | while IFS=$'\t' read -r type channel_id; do
+    # Get all unique type and channel_id combinations from source - use process substitution
+    while IFS=$'\t' read -r type channel_id; do
         # Validate inputs are numeric
         if ! [[ "$type" =~ ^[0-9]+$ ]] || ! [[ "$channel_id" =~ ^[0-9]+$ ]]; then
             log_error "Invalid type or channel_id: $type, $channel_id"
@@ -304,7 +337,11 @@ sync_aggregate() {
         fi
         
         # Get highest timestamp for this type and channel in destination
-        local max_timestamp=$(mysql_dest -e "SELECT IFNULL(MAX(timestamp), 0) FROM aggregate WHERE type = $type AND channel_id = $channel_id;")
+        local max_timestamp
+        if ! max_timestamp=$(mysql_dest -e "SELECT IFNULL(MAX(timestamp), 0) FROM aggregate WHERE type = $type AND channel_id = $channel_id;" 2>&1); then
+            log_error "Failed to get max timestamp for type $type, channel $channel_id"
+            max_timestamp=0
+        fi
         
         # Validate max_timestamp is numeric
         if ! [[ "$max_timestamp" =~ ^[0-9]+$ ]]; then
@@ -314,7 +351,11 @@ sync_aggregate() {
         log_message "Type $type, Channel $channel_id: Syncing aggregates after timestamp $max_timestamp"
         
         # Get count of new records
-        local new_count=$(mysql_source -e "SELECT COUNT(*) FROM aggregate WHERE type = $type AND channel_id = $channel_id AND timestamp > $max_timestamp;")
+        local new_count
+        if ! new_count=$(mysql_source -e "SELECT COUNT(*) FROM aggregate WHERE type = $type AND channel_id = $channel_id AND timestamp > $max_timestamp;" 2>&1); then
+            log_error "Failed to get count for type $type, channel $channel_id"
+            continue
+        fi
         
         if [ "$new_count" -gt 0 ]; then
             log_message "Found $new_count new aggregate records for type $type, channel $channel_id"
@@ -340,12 +381,16 @@ sync_aggregate() {
             
             # Execute the bulk insert
             if [ -s "$tmp_sql" ]; then
-                mysql_dest < "$tmp_sql"
+                if mysql_dest < "$tmp_sql" 2>&1; then
+                    log_message "Successfully synced aggregates for type $type, channel $channel_id"
+                else
+                    log_error "Failed to execute aggregate bulk insert for type $type, channel $channel_id"
+                fi
             fi
             
             rm -f "$tmp_sql"
         fi
-    done
+    done < <(mysql_source -e "SELECT DISTINCT type, channel_id FROM aggregate;")
     
     log_message "Aggregate sync completed."
 }
