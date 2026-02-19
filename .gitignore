@@ -1,0 +1,10 @@
+# Configuration file with passwords
+sync_volkszaehler.conf
+
+# Log files
+*.log
+
+# Temporary files
+*.tmp
+*.swp
+*~
