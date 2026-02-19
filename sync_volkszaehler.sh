@@ -2,60 +2,70 @@
 
 ###############################################################################
 # Volkszaehler Database Sync Script
-# Synchronizes MariaDB Volkszaehler database from Raspberry Pi to main computer
-# 
-# This script should be run on the main computer (has more resources)
-# It can be added to cron for automatic synchronization
+# Synchronisiert MariaDB Volkszaehler vom Raspberry Pi zum Hauptrechner
+#
+# Läuft auf dem Hauptrechner (mehr Ressourcen)
+# Für Cron-Betrieb geeignet (mit flock gegen parallele Ausführung)
+#
+# Cron-Eintrag (alle 5 Minuten):
+#   */5 * * * * flock -n /tmp/vz_sync.lock /usr/local/bin/sync_volkszaehler.sh
+#
+# Autor: Zusammengeführt aus eigenem Entwurf + GitHub Copilot-Vorschlag
 ###############################################################################
 
-set -eo pipefail  # Exit on error and handle pipe failures
+set -eo pipefail  # Abbruch bei Fehler und bei Pipe-Fehlern
 
-# Configuration - adjust these values or source from a config file
-if [ -f "$(dirname "$0")/sync_volkszaehler.conf" ]; then
-    source "$(dirname "$0")/sync_volkszaehler.conf"
+###############################################################################
+# Konfiguration laden
+# Entweder aus sync_volkszaehler.conf (empfohlen) oder Umgebungsvariablen
+###############################################################################
+SCRIPT_DIR="$(dirname "$(realpath "$0")")"
+
+if [ -f "$SCRIPT_DIR/sync_volkszaehler.conf" ]; then
+    # shellcheck source=/dev/null
+    source "$SCRIPT_DIR/sync_volkszaehler.conf"
 else
-    # Source Database (Raspberry Pi)
-    SOURCE_HOST="${SOURCE_HOST:-raspi}"
+    # Fallback: Defaults (bitte in sync_volkszaehler.conf auslagern!)
+    SOURCE_HOST="${SOURCE_HOST:-raspi.local}"
     SOURCE_PORT="${SOURCE_PORT:-3306}"
     SOURCE_USER="${SOURCE_USER:-volkszaehler}"
     SOURCE_PASS="${SOURCE_PASS:-}"
     SOURCE_DB="${SOURCE_DB:-volkszaehler}"
 
-    # Destination Database (Main Computer)
     DEST_HOST="${DEST_HOST:-localhost}"
     DEST_PORT="${DEST_PORT:-3306}"
     DEST_USER="${DEST_USER:-volkszaehler}"
     DEST_PASS="${DEST_PASS:-}"
     DEST_DB="${DEST_DB:-volkszaehler}"
+
+    LOG_FILE="${LOG_FILE:-/var/log/volkszaehler_sync.log}"
+    VERBOSE="${VERBOSE:-1}"
 fi
 
-# Logging
-LOG_FILE="${LOG_FILE:-/var/log/volkszaehler_sync.log}"
-VERBOSE="${VERBOSE:-1}"
+MAX_LOG_SIZE="${MAX_LOG_SIZE:-$((5 * 1024 * 1024))}"  # 5 MB Standard
 
-# Temporary files for MySQL config (to avoid password in process list)
+###############################################################################
+# Temporäre MySQL-Config-Dateien (Passwörter NICHT in Prozessliste sichtbar)
+###############################################################################
 SOURCE_CNF=""
 DEST_CNF=""
 
 ###############################################################################
-# Helper Functions
+# Cleanup bei Exit, Interrupt oder Fehler
 ###############################################################################
-
 cleanup() {
-    # Clean up temporary config files and SQL files
     [ -n "$SOURCE_CNF" ] && rm -f "$SOURCE_CNF"
-    [ -n "$DEST_CNF" ] && rm -f "$DEST_CNF"
-    # Clean up any temporary SQL files that might have been left
-    rm -f /tmp/tmp.*.sql 2>/dev/null || true
+    [ -n "$DEST_CNF" ]   && rm -f "$DEST_CNF"
+    rm -f /tmp/vz_sync_*.sql 2>/dev/null || true
 }
-
 trap cleanup EXIT INT TERM
 
-setup_mysql_config() {
-    # Create temporary MySQL config files to avoid password exposure
-    if [ -n "$SOURCE_PASS" ]; then
-        SOURCE_CNF=$(mktemp)
-        cat > "$SOURCE_CNF" << EOF
+###############################################################################
+# MySQL-Config-Dateien anlegen (chmod 600 — nur root lesbar)
+###############################################################################
+setup_mysql_configs() {
+    SOURCE_CNF=$(mktemp)
+    cat > "$SOURCE_CNF" << EOF
 [client]
 host=$SOURCE_HOST
 port=$SOURCE_PORT
@@ -63,12 +73,10 @@ user=$SOURCE_USER
 password=$SOURCE_PASS
 database=$SOURCE_DB
 EOF
-        chmod 600 "$SOURCE_CNF"
-    fi
+    chmod 600 "$SOURCE_CNF"
 
-    if [ -n "$DEST_PASS" ]; then
-        DEST_CNF=$(mktemp)
-        cat > "$DEST_CNF" << EOF
+    DEST_CNF=$(mktemp)
+    cat > "$DEST_CNF" << EOF
 [client]
 host=$DEST_HOST
 port=$DEST_PORT
@@ -76,87 +84,89 @@ user=$DEST_USER
 password=$DEST_PASS
 database=$DEST_DB
 EOF
-        chmod 600 "$DEST_CNF"
-    fi
+    chmod 600 "$DEST_CNF"
 }
 
-mysql_source() {
-    if [ -n "$SOURCE_CNF" ]; then
-        mysql --defaults-extra-file="$SOURCE_CNF" -N -s "$@"
-    else
-        mysql -h"$SOURCE_HOST" -P"$SOURCE_PORT" -u"$SOURCE_USER" "$SOURCE_DB" -N -s "$@"
-    fi
-}
-
-mysql_dest() {
-    if [ -n "$DEST_CNF" ]; then
-        mysql --defaults-extra-file="$DEST_CNF" -N -s "$@"
-    else
-        mysql -h"$DEST_HOST" -P"$DEST_PORT" -u"$DEST_USER" "$DEST_DB" -N -s "$@"
-    fi
-}
-
-log_message() {
-    local message="[$(date '+%Y-%m-%d %H:%M:%S')] $1"
-    if [ "$VERBOSE" -eq 1 ]; then
-        echo "$message"
-    fi
-    if [ -n "$LOG_FILE" ]; then
-        echo "$message" >> "$LOG_FILE"
-    fi
+###############################################################################
+# Hilfsfunktionen
+###############################################################################
+log() {
+    local msg="[$(date '+%Y-%m-%d %H:%M:%S')] $1"
+    [ "${VERBOSE:-1}" -eq 1 ] && echo "$msg"
+    [ -n "$LOG_FILE" ] && echo "$msg" >> "$LOG_FILE"
 }
 
 log_error() {
-    local message="[$(date '+%Y-%m-%d %H:%M:%S')] ERROR: $1"
-    echo "$message" >&2
-    if [ -n "$LOG_FILE" ]; then
-        echo "$message" >> "$LOG_FILE"
+    local msg="[$(date '+%Y-%m-%d %H:%M:%S')] FEHLER: $1"
+    echo "$msg" >&2
+    [ -n "$LOG_FILE" ] && echo "$msg" >> "$LOG_FILE"
+}
+
+# SQL auf Quell-DB (Raspi) ausführen
+source_sql() {
+    mysql --defaults-extra-file="$SOURCE_CNF" -N -s -e "$1" 2>>"$LOG_FILE"
+}
+
+# SQL auf Ziel-DB (Hauptrechner) ausführen
+dest_sql() {
+    mysql --defaults-extra-file="$DEST_CNF" -N -s -e "$1" 2>>"$LOG_FILE"
+}
+
+# SQL-Datei in Ziel-DB importieren
+dest_import() {
+    mysql --defaults-extra-file="$DEST_CNF" "$DEST_DB" < "$1" 2>>"$LOG_FILE"
+}
+
+# mysqldump von Quell-DB
+source_dump() {
+    mysqldump \
+        --defaults-extra-file="$SOURCE_CNF" \
+        --no-create-info \
+        --skip-add-drop-table \
+        --replace \
+        --skip-comments \
+        "$@"
+}
+
+# Log rotieren wenn zu groß
+rotate_log() {
+    if [ -f "$LOG_FILE" ] && [ "$(stat -c%s "$LOG_FILE")" -gt "$MAX_LOG_SIZE" ]; then
+        mv "$LOG_FILE" "${LOG_FILE}.1"
+        log "Log rotiert (>${MAX_LOG_SIZE} Bytes)"
     fi
 }
 
-check_connection() {
-    local host=$1
-    local port=$2
-    local user=$3
-    local pass=$4
-    local db=$5
-    
-    if [ -n "$pass" ]; then
-        local tmp_cnf=$(mktemp)
-        cat > "$tmp_cnf" << EOF
-[client]
-host=$host
-port=$port
-user=$user
-password=$pass
-database=$db
-EOF
-        chmod 600 "$tmp_cnf"
-        if ! mysql --defaults-extra-file="$tmp_cnf" -e "USE ${db};" 2>/dev/null; then
-            rm -f "$tmp_cnf"
-            return 1
-        fi
-        rm -f "$tmp_cnf"
-    else
-        if ! mysql -h"${host}" -P"${port}" -u"${user}" -e "USE ${db};" 2>/dev/null; then
-            return 1
-        fi
+###############################################################################
+# Verbindungsprüfung
+###############################################################################
+check_connections() {
+    log "Prüfe Verbindung zur Quell-DB ($SOURCE_HOST)..."
+    if ! mysql --defaults-extra-file="$SOURCE_CNF" -e "SELECT 1;" > /dev/null 2>&1; then
+        log_error "Keine Verbindung zur Quell-DB ($SOURCE_HOST:$SOURCE_PORT)"
+        exit 1
     fi
-    return 0
+    log "Quell-DB OK"
+
+    log "Prüfe Verbindung zur Ziel-DB ($DEST_HOST)..."
+    if ! mysql --defaults-extra-file="$DEST_CNF" -e "SELECT 1;" > /dev/null 2>&1; then
+        log_error "Keine Verbindung zur Ziel-DB ($DEST_HOST:$DEST_PORT)"
+        exit 1
+    fi
+    log "Ziel-DB OK"
 }
 
 ###############################################################################
-# Sync Functions
+# Sync: entities
+# Vollständiger Abgleich per ON DUPLICATE KEY UPDATE
+# (kleine Tabelle, ändert sich selten)
 ###############################################################################
-
 sync_entities() {
-    log_message "Syncing entities table..."
-    
-    # Create a temporary SQL file for bulk insert
-    local tmp_sql=$(mktemp)
-    
-    # Generate INSERT statements with proper escaping
-    mysql_source -e "
+    log "--- Sync: entities ---"
+
+    local tmp_sql
+    tmp_sql=$(mktemp /tmp/vz_sync_XXXXXX.sql)
+
+    source_sql "
         SELECT CONCAT(
             'INSERT INTO entities (id, uuid, type, class) VALUES (',
             id, ', ',
@@ -167,31 +177,29 @@ sync_entities() {
         )
         FROM entities;
     " > "$tmp_sql"
-    
-    # Execute the bulk insert
+
     if [ -s "$tmp_sql" ]; then
-        if mysql_dest < "$tmp_sql" 2>&1; then
-            local count=$(wc -l < "$tmp_sql")
-            log_message "Processed $count entity INSERT statements"
-        else
-            log_error "Failed to execute entities bulk insert"
-            rm -f "$tmp_sql"
-            return 1
-        fi
+        dest_import "$tmp_sql" \
+            && log "  entities: $(wc -l < "$tmp_sql") Zeilen verarbeitet" \
+            || { log_error "Import entities fehlgeschlagen"; rm -f "$tmp_sql"; return 1; }
+    else
+        log "  entities: keine Daten auf Quelle"
     fi
-    
+
     rm -f "$tmp_sql"
-    log_message "Entities sync completed."
 }
 
+###############################################################################
+# Sync: properties
+# Vollständiger Abgleich per ON DUPLICATE KEY UPDATE
+###############################################################################
 sync_properties() {
-    log_message "Syncing properties table..."
-    
-    # Create a temporary SQL file for bulk insert
-    local tmp_sql=$(mktemp)
-    
-    # Generate INSERT statements with proper escaping
-    mysql_source -e "
+    log "--- Sync: properties ---"
+
+    local tmp_sql
+    tmp_sql=$(mktemp /tmp/vz_sync_XXXXXX.sql)
+
+    source_sql "
         SELECT CONCAT(
             'INSERT INTO properties (pkey, entity_id, value) VALUES (',
             QUOTE(pkey), ', ',
@@ -201,31 +209,29 @@ sync_properties() {
         )
         FROM properties;
     " > "$tmp_sql"
-    
-    # Execute the bulk insert
+
     if [ -s "$tmp_sql" ]; then
-        if mysql_dest < "$tmp_sql" 2>&1; then
-            local count=$(wc -l < "$tmp_sql")
-            log_message "Processed $count property INSERT statements"
-        else
-            log_error "Failed to execute properties bulk insert"
-            rm -f "$tmp_sql"
-            return 1
-        fi
+        dest_import "$tmp_sql" \
+            && log "  properties: $(wc -l < "$tmp_sql") Zeilen verarbeitet" \
+            || { log_error "Import properties fehlgeschlagen"; rm -f "$tmp_sql"; return 1; }
+    else
+        log "  properties: keine Daten auf Quelle"
     fi
-    
+
     rm -f "$tmp_sql"
-    log_message "Properties sync completed."
 }
 
+###############################################################################
+# Sync: entities_in_aggregator
+# INSERT IGNORE reicht hier (keine änderbaren Felder, nur PK)
+###############################################################################
 sync_entities_in_aggregator() {
-    log_message "Syncing entities_in_aggregator table..."
-    
-    # Create a temporary SQL file for bulk insert
-    local tmp_sql=$(mktemp)
-    
-    # Generate INSERT statements
-    mysql_source -e "
+    log "--- Sync: entities_in_aggregator ---"
+
+    local tmp_sql
+    tmp_sql=$(mktemp /tmp/vz_sync_XXXXXX.sql)
+
+    source_sql "
         SELECT CONCAT(
             'INSERT IGNORE INTO entities_in_aggregator (parent_id, child_id) VALUES (',
             parent_id, ', ',
@@ -234,204 +240,165 @@ sync_entities_in_aggregator() {
         )
         FROM entities_in_aggregator;
     " > "$tmp_sql"
-    
-    # Execute the bulk insert
+
     if [ -s "$tmp_sql" ]; then
-        if mysql_dest < "$tmp_sql" 2>&1; then
-            local count=$(wc -l < "$tmp_sql")
-            log_message "Processed $count aggregator relationship INSERT statements"
-        else
-            log_error "Failed to execute aggregator relationships bulk insert"
-            rm -f "$tmp_sql"
-            return 1
-        fi
+        dest_import "$tmp_sql" \
+            && log "  entities_in_aggregator: $(wc -l < "$tmp_sql") Zeilen verarbeitet" \
+            || { log_error "Import entities_in_aggregator fehlgeschlagen"; rm -f "$tmp_sql"; return 1; }
+    else
+        log "  entities_in_aggregator: keine Daten auf Quelle"
     fi
-    
+
     rm -f "$tmp_sql"
-    log_message "Entities_in_aggregator sync completed."
 }
 
+###############################################################################
+# Sync: data
+# Inkrementell per MAX(timestamp) pro channel_id
+# mysqldump für effizienten Batch-Import (keine zeilenweisen INSERTs)
+###############################################################################
 sync_data() {
-    log_message "Syncing data table..."
-    
-    # Get all channel_ids from source
+    log "--- Sync: data ---"
+
     local channel_ids
-    if ! channel_ids=$(mysql_source -e "SELECT DISTINCT channel_id FROM data;" 2>&1); then
-        log_error "Failed to get channel_ids from source database"
-        return 1
+    channel_ids=$(source_sql "SELECT DISTINCT channel_id FROM data ORDER BY channel_id;") \
+        || { log_error "Konnte channel_ids nicht lesen"; return 1; }
+
+    if [ -z "$channel_ids" ]; then
+        log "  data: keine Kanäle auf Quelle"
+        return
     fi
-    
+
+    local total_new=0
+
     for channel_id in $channel_ids; do
-        # Validate channel_id is numeric
+        # Sicherheitscheck: nur numerische IDs zulassen
         if ! [[ "$channel_id" =~ ^[0-9]+$ ]]; then
-            log_error "Invalid channel_id: $channel_id"
+            log_error "Ungültige channel_id übersprungen: $channel_id"
             continue
         fi
-        
-        # Get highest timestamp for this channel in destination
-        local max_timestamp
-        if ! max_timestamp=$(mysql_dest -e "SELECT IFNULL(MAX(timestamp), 0) FROM data WHERE channel_id = $channel_id;" 2>&1); then
-            log_error "Failed to get max timestamp for channel $channel_id"
-            max_timestamp=0
-        fi
-        
-        # Validate max_timestamp is numeric
-        if ! [[ "$max_timestamp" =~ ^[0-9]+$ ]]; then
-            max_timestamp=0
-        fi
-        
-        log_message "Channel $channel_id: Syncing data after timestamp $max_timestamp"
-        
-        # Get count of new records
+
+        local max_ts
+        max_ts=$(dest_sql "SELECT IFNULL(MAX(timestamp), 0) FROM data WHERE channel_id = $channel_id;")
+        [[ "$max_ts" =~ ^[0-9]+$ ]] || max_ts=0
+
         local new_count
-        if ! new_count=$(mysql_source -e "SELECT COUNT(*) FROM data WHERE channel_id = $channel_id AND timestamp > $max_timestamp;" 2>&1); then
-            log_error "Failed to get count for channel $channel_id"
+        new_count=$(source_sql "SELECT COUNT(*) FROM data WHERE channel_id = $channel_id AND timestamp > $max_ts;")
+        [[ "$new_count" =~ ^[0-9]+$ ]] || new_count=0
+
+        if [ "$new_count" -eq 0 ]; then
+            log "  channel_id $channel_id: aktuell (MAX ts=$max_ts)"
             continue
         fi
-        
-        if [ "$new_count" -gt 0 ]; then
-            log_message "Found $new_count new records for channel $channel_id"
-            
-            # Create a temporary SQL file for bulk insert
-            local tmp_sql=$(mktemp)
-            
-            # Generate INSERT statements for new data
-            mysql_source -e "
-                SELECT CONCAT(
-                    'INSERT INTO data (timestamp, channel_id, value) VALUES (',
-                    timestamp, ', ',
-                    channel_id, ', ',
-                    value,
-                    ') ON DUPLICATE KEY UPDATE value=VALUES(value);'
-                )
-                FROM data
-                WHERE channel_id = $channel_id AND timestamp > $max_timestamp
-                ORDER BY timestamp;
-            " > "$tmp_sql"
-            
-            # Execute the bulk insert
-            if [ -s "$tmp_sql" ]; then
-                if mysql_dest < "$tmp_sql" 2>&1; then
-                    log_message "Successfully synced $new_count records for channel $channel_id"
-                else
-                    log_error "Failed to execute data bulk insert for channel $channel_id"
-                fi
-            fi
-            
+
+        log "  channel_id $channel_id: $new_count neue Einträge (ab ts=$max_ts)"
+
+        local tmp_sql
+        tmp_sql=$(mktemp /tmp/vz_sync_XXXXXX.sql)
+
+        # mysqldump: effizienter Batch-Export (deutlich schneller als zeilenweise INSERTs
+        # bei großen Datenmengen, wie sie Volkszähler produziert)
+        source_dump \
+            --where="channel_id = $channel_id AND timestamp > $max_ts" \
+            "$SOURCE_DB" data > "$tmp_sql"
+
+        if [ $? -ne 0 ] || [ ! -s "$tmp_sql" ]; then
+            log_error "Dump channel_id $channel_id fehlgeschlagen"
             rm -f "$tmp_sql"
+            continue
         fi
+
+        dest_import "$tmp_sql" \
+            && log "  channel_id $channel_id: $new_count Einträge importiert" \
+            || log_error "Import channel_id $channel_id fehlgeschlagen"
+
+        rm -f "$tmp_sql"
+        total_new=$((total_new + new_count))
     done
-    
-    log_message "Data sync completed."
+
+    log "  data gesamt: $total_new neue Einträge importiert"
 }
 
+###############################################################################
+# Sync: aggregate
+# Inkrementell per MAX(timestamp) pro type + channel_id
+# mysqldump für effizienten Batch-Import
+###############################################################################
 sync_aggregate() {
-    log_message "Syncing aggregate table..."
-    
-    # Get all unique type and channel_id combinations from source - use process substitution
-    while IFS=$'\t' read -r type channel_id; do
-        # Validate inputs are numeric
-        if ! [[ "$type" =~ ^[0-9]+$ ]] || ! [[ "$channel_id" =~ ^[0-9]+$ ]]; then
-            log_error "Invalid type or channel_id: $type, $channel_id"
+    log "--- Sync: aggregate ---"
+
+    local total_new=0
+
+    # process substitution verhindert Subshell-Probleme bei while+read
+    while IFS=$'\t' read -r agg_type channel_id; do
+
+        if ! [[ "$agg_type" =~ ^[0-9]+$ ]] || ! [[ "$channel_id" =~ ^[0-9]+$ ]]; then
+            log_error "Ungültige type/channel_id übersprungen: $agg_type / $channel_id"
             continue
         fi
-        
-        # Get highest timestamp for this type and channel in destination
-        local max_timestamp
-        if ! max_timestamp=$(mysql_dest -e "SELECT IFNULL(MAX(timestamp), 0) FROM aggregate WHERE type = $type AND channel_id = $channel_id;" 2>&1); then
-            log_error "Failed to get max timestamp for type $type, channel $channel_id"
-            max_timestamp=0
-        fi
-        
-        # Validate max_timestamp is numeric
-        if ! [[ "$max_timestamp" =~ ^[0-9]+$ ]]; then
-            max_timestamp=0
-        fi
-        
-        log_message "Type $type, Channel $channel_id: Syncing aggregates after timestamp $max_timestamp"
-        
-        # Get count of new records
+
+        local max_ts
+        max_ts=$(dest_sql "SELECT IFNULL(MAX(timestamp), 0) FROM aggregate
+            WHERE type = $agg_type AND channel_id = $channel_id;")
+        [[ "$max_ts" =~ ^[0-9]+$ ]] || max_ts=0
+
         local new_count
-        if ! new_count=$(mysql_source -e "SELECT COUNT(*) FROM aggregate WHERE type = $type AND channel_id = $channel_id AND timestamp > $max_timestamp;" 2>&1); then
-            log_error "Failed to get count for type $type, channel $channel_id"
+        new_count=$(source_sql "SELECT COUNT(*) FROM aggregate
+            WHERE type = $agg_type AND channel_id = $channel_id AND timestamp > $max_ts;")
+        [[ "$new_count" =~ ^[0-9]+$ ]] || new_count=0
+
+        if [ "$new_count" -eq 0 ]; then
+            log "  aggregate type=$agg_type channel=$channel_id: aktuell"
             continue
         fi
-        
-        if [ "$new_count" -gt 0 ]; then
-            log_message "Found $new_count new aggregate records for type $type, channel $channel_id"
-            
-            # Create a temporary SQL file for bulk insert
-            local tmp_sql=$(mktemp)
-            
-            # Generate INSERT statements for new aggregates
-            mysql_source -e "
-                SELECT CONCAT(
-                    'INSERT INTO aggregate (type, timestamp, channel_id, value, count) VALUES (',
-                    type, ', ',
-                    timestamp, ', ',
-                    channel_id, ', ',
-                    value, ', ',
-                    count,
-                    ') ON DUPLICATE KEY UPDATE value=VALUES(value), count=VALUES(count);'
-                )
-                FROM aggregate
-                WHERE type = $type AND channel_id = $channel_id AND timestamp > $max_timestamp
-                ORDER BY timestamp;
-            " > "$tmp_sql"
-            
-            # Execute the bulk insert
-            if [ -s "$tmp_sql" ]; then
-                if mysql_dest < "$tmp_sql" 2>&1; then
-                    log_message "Successfully synced aggregates for type $type, channel $channel_id"
-                else
-                    log_error "Failed to execute aggregate bulk insert for type $type, channel $channel_id"
-                fi
-            fi
-            
+
+        log "  aggregate type=$agg_type channel=$channel_id: $new_count neue Einträge"
+
+        local tmp_sql
+        tmp_sql=$(mktemp /tmp/vz_sync_XXXXXX.sql)
+
+        source_dump \
+            --where="type = $agg_type AND channel_id = $channel_id AND timestamp > $max_ts" \
+            "$SOURCE_DB" aggregate > "$tmp_sql"
+
+        if [ $? -ne 0 ] || [ ! -s "$tmp_sql" ]; then
+            log_error "Dump aggregate type=$agg_type channel=$channel_id fehlgeschlagen"
             rm -f "$tmp_sql"
+            continue
         fi
-    done < <(mysql_source -e "SELECT DISTINCT type, channel_id FROM aggregate;")
-    
-    log_message "Aggregate sync completed."
+
+        dest_import "$tmp_sql" \
+            && log "  aggregate type=$agg_type channel=$channel_id: importiert" \
+            || log_error "Import aggregate type=$agg_type channel=$channel_id fehlgeschlagen"
+
+        rm -f "$tmp_sql"
+        total_new=$((total_new + new_count))
+
+    done < <(source_sql "SELECT DISTINCT type, channel_id FROM aggregate ORDER BY type, channel_id;")
+
+    log "  aggregate gesamt: $total_new neue Einträge importiert"
 }
 
 ###############################################################################
-# Main Execution
+# Main
 ###############################################################################
-
 main() {
-    log_message "=== Starting Volkszaehler Database Sync ==="
-    
-    # Setup MySQL configuration files
-    setup_mysql_config
-    
-    # Check connections
-    log_message "Checking source database connection..."
-    if ! check_connection "$SOURCE_HOST" "$SOURCE_PORT" "$SOURCE_USER" "$SOURCE_PASS" "$SOURCE_DB"; then
-        log_error "Failed to connect to source database at ${SOURCE_HOST}:${SOURCE_PORT}"
-        exit 1
-    fi
-    log_message "Source database connection OK"
-    
-    log_message "Checking destination database connection..."
-    if ! check_connection "$DEST_HOST" "$DEST_PORT" "$DEST_USER" "$DEST_PASS" "$DEST_DB"; then
-        log_error "Failed to connect to destination database at ${DEST_HOST}:${DEST_PORT}"
-        exit 1
-    fi
-    log_message "Destination database connection OK"
-    
-    # Sync tables in order
-    # First sync master data (entities, properties, relationships)
-    sync_entities
-    sync_properties
-    sync_entities_in_aggregator
-    
-    # Then sync time-series data
-    sync_data
-    sync_aggregate
-    
-    log_message "=== Volkszaehler Database Sync Completed Successfully ==="
+    rotate_log
+    log "========== Sync gestartet =========="
+
+    setup_mysql_configs
+    check_connections
+
+    # Erst Stammdaten (entities, properties, Beziehungen)
+    sync_entities               || { log_error "Abbruch bei entities";                exit 1; }
+    sync_properties             || { log_error "Abbruch bei properties";              exit 1; }
+    sync_entities_in_aggregator || { log_error "Abbruch bei entities_in_aggregator"; exit 1; }
+
+    # Dann Zeitreihendaten
+    sync_data                   || { log_error "Abbruch bei data";                    exit 1; }
+    sync_aggregate              || { log_error "Abbruch bei aggregate";               exit 1; }
+
+    log "========== Sync erfolgreich abgeschlossen =========="
 }
 
-# Run main function
 main "$@"

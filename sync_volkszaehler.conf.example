@@ -1,23 +1,42 @@
 #!/bin/bash
 ###############################################################################
-# Volkszaehler Sync Configuration File
-# Copy this file to sync_volkszaehler.conf and adjust the values
+# Volkszaehler Sync - Konfigurationsdatei
+#
+# Diese Datei nach sync_volkszaehler.conf kopieren und anpassen.
+# NICHT ins Git einchecken (enthält Passwörter)!
+# .gitignore-Eintrag empfohlen: sync_volkszaehler.conf
 ###############################################################################
 
-# Source Database (Raspberry Pi)
-SOURCE_HOST="raspi.local"
+# --- Quell-Datenbank (Raspberry Pi) -----------------------------------------
+SOURCE_HOST="raspi.local"       # Hostname oder IP des Raspi
 SOURCE_PORT="3306"
-SOURCE_USER="volkszaehler"
-SOURCE_PASS="your_raspi_password"
+SOURCE_USER="vz_sync"           # DB-User auf dem Raspi (nur SELECT-Rechte nötig)
+SOURCE_PASS="raspi_passwort"
 SOURCE_DB="volkszaehler"
 
-# Destination Database (Main Computer)
+# --- Ziel-Datenbank (Hauptrechner) ------------------------------------------
 DEST_HOST="localhost"
 DEST_PORT="3306"
-DEST_USER="volkszaehler"
-DEST_PASS="your_main_password"
+DEST_USER="vz_sync"             # DB-User auf Hauptrechner (SELECT + INSERT + REPLACE)
+DEST_PASS="main_passwort"
 DEST_DB="volkszaehler"
 
-# Logging
+# --- Logging ----------------------------------------------------------------
 LOG_FILE="/var/log/volkszaehler_sync.log"
-VERBOSE="1"  # Set to 0 to disable console output
+VERBOSE="1"          # 1 = auch auf stdout ausgeben, 0 = nur in Logfile
+MAX_LOG_SIZE="5242880"  # 5 MB, danach wird rotiert
+
+###############################################################################
+# Benötigte DB-Rechte:
+#
+# Raspi (Quelle):
+#   CREATE USER 'vz_sync'@'IP_HAUPTRECHNER' IDENTIFIED BY 'raspi_passwort';
+#   GRANT SELECT ON volkszaehler.* TO 'vz_sync'@'IP_HAUPTRECHNER';
+#
+# Hauptrechner (Ziel):
+#   CREATE USER 'vz_sync'@'localhost' IDENTIFIED BY 'main_passwort';
+#   GRANT SELECT, INSERT, UPDATE, REPLACE ON volkszaehler.* TO 'vz_sync'@'localhost';
+#
+# Cron-Eintrag (alle 5 Minuten, flock verhindert parallele Ausführung):
+#   */5 * * * * flock -n /tmp/vz_sync.lock /usr/local/bin/sync_volkszaehler.sh
+###############################################################################
