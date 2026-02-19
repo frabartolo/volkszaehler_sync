@@ -1,0 +1,23 @@
+#!/bin/bash
+###############################################################################
+# Volkszaehler Sync Configuration File
+# Copy this file to sync_volkszaehler.conf and adjust the values
+###############################################################################
+
+# Source Database (Raspberry Pi)
+SOURCE_HOST="raspi.local"
+SOURCE_PORT="3306"
+SOURCE_USER="volkszaehler"
+SOURCE_PASS="your_raspi_password"
+SOURCE_DB="volkszaehler"
+
+# Destination Database (Main Computer)
+DEST_HOST="localhost"
+DEST_PORT="3306"
+DEST_USER="volkszaehler"
+DEST_PASS="your_main_password"
+DEST_DB="volkszaehler"
+
+# Logging
+LOG_FILE="/var/log/volkszaehler_sync.log"
+VERBOSE="1"  # Set to 0 to disable console output
