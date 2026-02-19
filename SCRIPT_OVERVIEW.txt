@@ -1,0 +1,151 @@
+================================================================================
+VOLKSZAEHLER DATABASE SYNCHRONIZATION SCRIPT - OVERVIEW
+================================================================================
+
+PURPOSE:
+--------
+Synchronizes a Volkszaehler MariaDB database from a Raspberry Pi to a main
+computer. Designed to run on the main computer (which has more resources) and
+can be integrated into a cron job for automatic synchronization.
+
+SYNCHRONIZED TABLES:
+--------------------
+1. entities              - Entities/Channels (master data)
+2. properties            - Entity properties
+3. entities_in_aggregator - Entity relationships
+4. data                  - Measurement data (incremental by timestamp)
+5. aggregate             - Aggregated data (incremental by timestamp)
+
+KEY FEATURES:
+-------------
+✓ Incremental synchronization (only transfers new data)
+✓ Bulk INSERT operations for high performance
+✓ Updates existing entries, inserts missing ones
+✓ Secure password handling (no exposure in process list)
+✓ SQL injection protection via MySQL QUOTE() function
+✓ Input validation for numeric values
+✓ Comprehensive error handling and logging
+✓ Connection checking before sync
+✓ Configurable via file or environment variables
+✓ Clean temporary file handling
+
+SECURITY MEASURES:
+------------------
+→ Passwords stored in temporary config files (chmod 600)
+→ SQL injection prevention using MySQL's QUOTE()
+→ Numeric value validation
+→ Proper cleanup on exit/interrupt (trap)
+→ .gitignore protects config file from commits
+
+PERFORMANCE OPTIMIZATIONS:
+--------------------------
+→ Bulk INSERT instead of individual queries (prevents N+1)
+→ SQL generation on source database (reduces client overhead)
+→ Incremental sync based on MAX(timestamp) per channel
+→ Process substitution for efficient loops
+→ Minimal data transfer (only new records)
+
+USAGE:
+------
+1. Setup:
+   cp sync_volkszaehler.conf.example sync_volkszaehler.conf
+   nano sync_volkszaehler.conf  # Edit database credentials
+   
+2. Test run:
+   ./sync_volkszaehler.sh
+   
+3. Check logs:
+   tail -f /var/log/volkszaehler_sync.log
+   
+4. Add to cron (hourly at minute 5):
+   crontab -e
+   5 * * * * /path/to/sync_volkszaehler.sh
+
+CONFIGURATION PARAMETERS:
+-------------------------
+SOURCE_HOST    - Raspberry Pi hostname/IP
+SOURCE_PORT    - MySQL port (default: 3306)
+SOURCE_USER    - Database username
+SOURCE_PASS    - Database password
+SOURCE_DB      - Database name (default: volkszaehler)
+
+DEST_HOST      - Main computer hostname/IP
+DEST_PORT      - MySQL port (default: 3306)
+DEST_USER      - Database username
+DEST_PASS      - Database password
+DEST_DB        - Database name (default: volkszaehler)
+
+LOG_FILE       - Log file path
+VERBOSE        - Console output (1=on, 0=off)
+
+SYNCHRONIZATION LOGIC:
+----------------------
+1. Check both database connections
+2. Sync master data tables (entities, properties, relationships)
+3. For data table:
+   - Get all channel_ids from source
+   - For each channel: get MAX(timestamp) from destination
+   - Fetch and insert all records with timestamp > MAX
+4. For aggregate table:
+   - Get all (type, channel_id) combinations
+   - For each combination: get MAX(timestamp) from destination
+   - Fetch and insert all records with timestamp > MAX
+
+ERROR HANDLING:
+---------------
+→ Connection failures: Script exits with error message
+→ SQL errors: Logged and reported, continues with next operation
+→ Invalid data: Validated and skipped with warning
+→ Interrupted execution: Cleanup function removes temp files
+
+FILES IN THIS REPOSITORY:
+--------------------------
+sync_volkszaehler.sh          - Main synchronization script (437 lines)
+sync_volkszaehler.conf.example - Configuration template
+README.md                      - Comprehensive documentation (German)
+EXAMPLES.md                    - Usage examples and troubleshooting
+test_sync.sh                   - Validation test script
+.gitignore                     - Protects sensitive files
+
+TESTING:
+--------
+Run the test script:
+  ./test_sync.sh
+
+This validates:
+  ✓ Script syntax
+  ✓ Executable permissions
+  ✓ Configuration file structure
+  ✓ All sync functions present
+  ✓ Overall structure
+
+TROUBLESHOOTING:
+----------------
+See EXAMPLES.md for detailed troubleshooting guide including:
+- Connection testing
+- Database structure verification
+- Log monitoring
+- Performance tips
+- Security best practices
+
+REQUIREMENTS:
+-------------
+- Bash shell
+- MySQL/MariaDB client (mysql command)
+- Network access from main computer to Raspberry Pi
+- Appropriate database permissions on both systems
+
+NEXT STEPS:
+-----------
+1. Configure credentials in sync_volkszaehler.conf
+2. Test with actual databases
+3. Verify synchronization in logs
+4. Set up cron job for automatic sync
+5. Configure log rotation (see EXAMPLES.md)
+6. Optional: Set up email alerts for failures
+
+================================================================================
+Created: 2024-02-19
+Version: 1.0
+License: Open Source
+================================================================================
