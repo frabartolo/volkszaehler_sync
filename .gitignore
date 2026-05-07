@@ -3,6 +3,7 @@ sync_volkszaehler.conf
 
 # Log files
 *.log
+logs/
 
 # Temporary files
 *.tmp
