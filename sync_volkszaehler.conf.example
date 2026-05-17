@@ -22,7 +22,7 @@ DEST_PASS="main_passwort"
 DEST_DB="volkszaehler"
 
 # --- Logging ----------------------------------------------------------------
-LOG_FILE="/var/log/volkszaehler_sync.log"
+LOG_FILE="$SCRIPT_DIR/logs/volkszaehler_sync.log"   # oder /var/log/... (braucht root)
 VERBOSE="1"          # 1 = auch auf stdout ausgeben, 0 = nur in Logfile
 MAX_LOG_SIZE="5242880"  # 5 MB, danach wird rotiert
 

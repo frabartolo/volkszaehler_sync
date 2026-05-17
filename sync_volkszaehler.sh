@@ -44,6 +44,23 @@ fi
 
 MAX_LOG_SIZE="${MAX_LOG_SIZE:-$((5 * 1024 * 1024))}"  # 5 MB Standard
 
+# Log-Datei: Standard im Repo (ohne root), Fallback wenn /var/log nicht beschreibbar
+setup_log_file() {
+    local default_log="$SCRIPT_DIR/logs/volkszaehler_sync.log"
+    LOG_FILE="${LOG_FILE:-$default_log}"
+    mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null || true
+    if ! touch "$LOG_FILE" 2>/dev/null; then
+        LOG_FILE="$default_log"
+        mkdir -p "$(dirname "$LOG_FILE")"
+        touch "$LOG_FILE" || {
+            echo "FEHLER: Log-Datei nicht beschreibbar: $LOG_FILE" >&2
+            exit 1
+        }
+        echo "Hinweis: LOG_FILE nicht beschreibbar, nutze $LOG_FILE" >&2
+    fi
+}
+setup_log_file
+
 ###############################################################################
 # Temporäre MySQL-Config-Dateien (Passwörter NICHT in Prozessliste sichtbar)
 ###############################################################################
@@ -71,7 +88,6 @@ host=$SOURCE_HOST
 port=$SOURCE_PORT
 user=$SOURCE_USER
 password=$SOURCE_PASS
-database=$SOURCE_DB
 EOF
     chmod 600 "$SOURCE_CNF"
 
@@ -82,7 +98,6 @@ host=$DEST_HOST
 port=$DEST_PORT
 user=$DEST_USER
 password=$DEST_PASS
-database=$DEST_DB
 EOF
     chmod 600 "$DEST_CNF"
 }
@@ -104,12 +119,12 @@ log_error() {
 
 # SQL auf Quell-DB (Raspi) ausführen
 source_sql() {
-    mysql --defaults-extra-file="$SOURCE_CNF" -N -s -e "$1" 2>>"$LOG_FILE"
+    mysql --defaults-extra-file="$SOURCE_CNF" -N -s "$SOURCE_DB" -e "$1" 2>>"$LOG_FILE"
 }
 
 # SQL auf Ziel-DB (Hauptrechner) ausführen
 dest_sql() {
-    mysql --defaults-extra-file="$DEST_CNF" -N -s -e "$1" 2>>"$LOG_FILE"
+    mysql --defaults-extra-file="$DEST_CNF" -N -s "$DEST_DB" -e "$1" 2>>"$LOG_FILE"
 }
 
 # SQL-Datei in Ziel-DB importieren
@@ -141,14 +156,14 @@ rotate_log() {
 ###############################################################################
 check_connections() {
     log "Prüfe Verbindung zur Quell-DB ($SOURCE_HOST)..."
-    if ! mysql --defaults-extra-file="$SOURCE_CNF" -e "SELECT 1;" > /dev/null 2>&1; then
+    if ! mysql --defaults-extra-file="$SOURCE_CNF" "$SOURCE_DB" -e "SELECT 1;" > /dev/null 2>&1; then
         log_error "Keine Verbindung zur Quell-DB ($SOURCE_HOST:$SOURCE_PORT)"
         exit 1
     fi
     log "Quell-DB OK"
 
     log "Prüfe Verbindung zur Ziel-DB ($DEST_HOST)..."
-    if ! mysql --defaults-extra-file="$DEST_CNF" -e "SELECT 1;" > /dev/null 2>&1; then
+    if ! mysql --defaults-extra-file="$DEST_CNF" "$DEST_DB" -e "SELECT 1;" > /dev/null 2>&1; then
         log_error "Keine Verbindung zur Ziel-DB ($DEST_HOST:$DEST_PORT)"
         exit 1
     fi
