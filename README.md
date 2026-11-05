@@ -2,6 +2,9 @@
 
 Ein Shell-Skript zur Synchronisation einer MariaDB-Datenbank vom Volkszähler auf einem Raspberry Pi zu einem Hauptrechner.
 
+> **Einmalige Server-zu-Server-Migration** (z. B. cold-lairs → khanhiwara):
+> siehe separates Paket `~/Workspace/cold-lairs2khanhiwara/` (nicht dieses Repo).
+
 ## Übersicht
 
 Dieses Skript synchronisiert automatisch alle Daten aus einer Volkszaehler-Datenbank auf einem Raspberry Pi zu einer MariaDB-Datenbank auf einem Hauptrechner. Es ist für die Integration in einen Cron-Job konzipiert und läuft auf dem Hauptrechner (der mehr Ressourcen hat).

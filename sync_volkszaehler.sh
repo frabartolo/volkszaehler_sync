@@ -20,10 +20,11 @@ set -eo pipefail  # Abbruch bei Fehler und bei Pipe-Fehlern
 # Entweder aus sync_volkszaehler.conf (empfohlen) oder Umgebungsvariablen
 ###############################################################################
 SCRIPT_DIR="$(dirname "$(realpath "$0")")"
+CONF="${SYNC_CONF:-$SCRIPT_DIR/sync_volkszaehler.conf}"
 
-if [ -f "$SCRIPT_DIR/sync_volkszaehler.conf" ]; then
+if [ -f "$CONF" ]; then
     # shellcheck source=/dev/null
-    source "$SCRIPT_DIR/sync_volkszaehler.conf"
+    source "$CONF"
 else
     # Fallback: Defaults (bitte in sync_volkszaehler.conf auslagern!)
     SOURCE_HOST="${SOURCE_HOST:-raspi.local}"
